@@ -9,10 +9,9 @@
 #include "MIDIUSB.h"
 
 //SENSOR CONFIG
-static int THERMAL_NOISE = 8;       // ignore if sensor change is too small. Used to filter electrical noise
-static bool DEBOUNCE = true;        // used to debounce of midi message (eg: 80 82 80 last 80 is not sent)
-unsigned long MIN_IDLE_MS = 10;     // at least 10 ms before sending next Midi message, too many are not useful
-static int MAX_A = 910;             // analog (A0-A3) sensor range in Leonardo should give maximum value 1000, but it does not reach 928 or less
+const bool DEBOUNCE = true;        // used to debounce of midi message (eg: 80 82 80 last 80 is not sent)
+const unsigned long MIN_IDLE_MS = 10;     // at least 10 ms before sending next Midi message, too many are not useful
+const int MAX_A = 910;             // analog (A0-A3) sensor range in Leonardo should give maximum value 1000, but it does not reach 928 or less
 
 //MIDI CC VALUES
 #define SUSTAIN_CC      64;
@@ -21,12 +20,12 @@ static int MAX_A = 910;             // analog (A0-A3) sensor range in Leonardo s
 #define AMBIENT_VOL_CC  17;
 
 //MIDI CONFIG
-static int CHANNEL = 2;               // channel used to send messages, values are MIDI CH 1-16
-static int PED_CC = SUSTAIN_CC;       // ANALOG JACK for sustain pedal
-static int LEFT_CC = AMBIENT_VOL_CC;  // RIGHT KNOB (inverted)
-static int MID_CC = CLOSE_VOL_CC;     // MIDDLE KNOB (inverted)
-static int RIGHT_CC = SOFT_CC;        // LEFT KNOB (inverted)
-static int DIGI_CC = SOFT_CC;         // DIGITAL JACK for soft pedal
+const int CHANNEL = 2;               // channel used to send messages, values are MIDI CH 1-16
+const int PED_CC = SUSTAIN_CC;       // ANALOG JACK for sustain pedal
+const int LEFT_CC = AMBIENT_VOL_CC;  // RIGHT KNOB (inverted)
+const int MID_CC = CLOSE_VOL_CC;     // MIDDLE KNOB (inverted)
+const int RIGHT_CC = SOFT_CC;        // LEFT KNOB (inverted)
+const int DIGI_CC = SOFT_CC;         // DIGITAL JACK for soft pedal
 
 // CC for Garritan https://usermanuals.garritan.com/CFXConcertGrand/Content/midi_controls_automation.htm
 /*
@@ -99,7 +98,6 @@ class Sensor {
   int _channel;
   bool _invert;
   unsigned long _last_midi_millis = 0;
-  int _lastsensorvalue = 0;
   int _last_midivalue = 0;
   int _prev_midivalue = 0;
 
@@ -118,18 +116,14 @@ class Sensor {
       return;
     }
     int sensorValue = analogRead(_sensor);
-    if(abs(sensorValue - _lastsensorvalue) < THERMAL_NOISE) {         // Ignore if sensor change is too small. Used to filter electrical noise
-      return;
-    }
     int midivalue = min(1.0 * sensorValue/_max_sensor * 127, 127);    // Scale sensor reading to 0-127
     if (_invert){
       midivalue = 127 - midivalue;                                    // Invert value if sensor is mounted in reverse
     }    
     if ( (midivalue == _last_midivalue) ||                            // Skip if midi value not changed, even if sensorValue was changed
-      (DEBOUNCE == true && midivalue == _prev_midivalue)) {           // Avoids also simple bounce back of MIDI message. eg: 80 82 80, last 80 is not sent.
+      (DEBOUNCE == true && midivalue == _prev_midivalue)) {           // Avoid also simple bounce back of MIDI message. eg: 80 82 80, last 80 is not sent. Allows smooth monotone ramps.
       return;
     }
-    _lastsensorvalue = sensorValue;
     _prev_midivalue = _last_midivalue;
     _last_midivalue = midivalue;
     controlChange(_channel, _midi_cc, midivalue);
