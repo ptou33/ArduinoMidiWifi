@@ -1,9 +1,73 @@
 /*
- * Pianoteq controls
+ * Sustain analog pedal, 3 CC, Damper switch pedal
  * Pietro Tou
+ * 2022_10_23
+ * 
+ * This project uses a Leonardo Arduino, because it has USB MIDI programmability
  */ 
 
 #include "MIDIUSB.h"
+
+//SENSOR CONFIG
+static int THERMAL_NOISE = 8;       // ignore if sensor change is too small. Used to filter electrical noise
+static bool DEBOUNCE = true;        // used to debounce of midi message (eg: 80 82 80 last 80 is not sent)
+unsigned long MIN_IDLE_MS = 10;     // at least 10 ms before sending next Midi message, too many are not useful
+static int MAX_A = 910;             // analog (A0-A3) sensor range in Leonardo should give maximum value 1000, but it does not reach 928 or less
+
+//MIDI CC VALUES
+#define SUSTAIN_CC      64;
+#define SOFT_CC         67;
+#define CLOSE_VOL_CC    16;
+#define AMBIENT_VOL_CC  17;
+
+//MIDI CONFIG
+static int CHANNEL = 2;               // channel used to send messages, values are MIDI CH 1-16
+static int PED_CC = SUSTAIN_CC;       // ANALOG JACK for sustain pedal
+static int LEFT_CC = AMBIENT_VOL_CC;  // RIGHT KNOB (inverted)
+static int MID_CC = CLOSE_VOL_CC;     // MIDDLE KNOB (inverted)
+static int RIGHT_CC = SOFT_CC;        // LEFT KNOB (inverted)
+static int DIGI_CC = SOFT_CC;         // DIGITAL JACK for soft pedal
+
+// CC for Garritan https://usermanuals.garritan.com/CFXConcertGrand/Content/midi_controls_automation.htm
+/*
+Control                     MIDI CC number
+  Master Volume             7
+  Master Pan                10
+  Close Stereo Width        14
+  Ambient Stereo Width      15
+Close Volume                16
+Ambient Volume              17
+  Close EQ Lo gain          22
+  Close EQ Mid gain         23
+  Close EQ Hi gain          24
+  Close EQ on/off           25 (On from 1-64, and off from 65-127)
+  Close EQ Mid frequency    26
+  Ambient EQ Lo gain        27
+  Ambient EQ Mid gain       28
+  Ambient EQ Hi gain        29
+  Ambient EQ on/off         30 (On from 1-64, and off from 65-127)
+  Ambient EQ Mid frequency  31
+Sustain Pedal on/off        64 (On from 1-127) GUI pedal light turns on at 64
+  Sostenuto Pedal on/off    66 (On from 1-127) GUI pedal light turns on at 64
+Soft Pedal on/off           67 (Off from 0-63, on from 64-127)
+  Pedal Noise               76
+  Sustain Resonance         84
+  Sustain Resonance Bypass  85
+  Sympathetic Resonance     87
+  Reverb Send Level         91
+  Saturation                93
+  Stretch Tuning            100
+  Room/Release Volume       256
+  Room/Release Decay        257
+  Release Crossfade         258
+  Dynamic Range             259
+  Close Mute                268
+  Ambient Mute              269
+  Stereo Image              270
+  Limiter on/off            292
+  Ambient Pre-Delay         300
+  Timbre Effect             489
+*/
 
 void noteOn(byte channel, byte pitch, byte velocity) {
   midiEventPacket_t noteOn = {0x09, 0x90 | channel, pitch, velocity};
@@ -15,90 +79,145 @@ void noteOff(byte channel, byte pitch, byte velocity) {
   MidiUSB.sendMIDI(noteOff);
 }
 
-
-// First parameter is the event type (0x0B = control change).
-// Second parameter is the event type, combined with the channel.
-// Third parameter is the control number number (0-119).
-// Fourth parameter is the control value (0-127).
-
 void controlChange(byte channel, byte control, byte value) {
   midiEventPacket_t event = {0x0B, 0xB0 | channel, control, value};
+  // First parameter is the event type (0x0B = control change).
+  // Second parameter is the event type, combined with the channel.
+  // Third parameter is the control number number (0-119).
+  // Fourth parameter is the control value (0-127).
   MidiUSB.sendMIDI(event);
 }
 
 
-static bool NO_DEBOUNCE=0;
-
+// -----------------------------------------------------------------------------
+// Analog Sensor
+// -----------------------------------------------------------------------------
 class Sensor {
-  public:
   byte _sensor;
   int _max_sensor;
   int _midi_cc;
-  int _midi_cc2;
   int _channel;
   bool _invert;
-  unsigned long _min_idle;
-  unsigned long last_midi_millis=0;
-  int lastsensorvalue=0;
-  int last_midivalue=0;
-  int prev_midivalue=0;
-  
-  Sensor(byte sensor, int max_sensor, int channel, int midi_cc, bool invert=0,int midi_cc2=-1, unsigned long min_idle=10) {
+  unsigned long _last_midi_millis = 0;
+  int _lastsensorvalue = 0;
+  int _last_midivalue = 0;
+  int _prev_midivalue = 0;
+
+  public:
+  Sensor(byte sensor, int max_sensor, int user_channel, int midi_cc, bool invert=false) {
     _sensor = sensor;
     _max_sensor = max_sensor;
     _midi_cc = midi_cc;
-    _channel = channel-1;
-    _invert = invert;
-    _midi_cc2 = midi_cc2;
-    _min_idle = min_idle;
-  };
+    _channel = user_channel - 1;  // send 0-15 as channel. Typically reported to the user as MIDI CH 1-16
+    _invert = invert;             // true to map 0-127 to 127-0
+  }
 
-  void manage_sensor(){
-    int sensorValue=analogRead(_sensor);
+  void manage_sensor(bool debug) {
+    unsigned long now = millis();
+    if (now - _last_midi_millis <= MIN_IDLE_MS) {                     // At least _min_idle ms before sending next Midi message
+      return;
+    }
+    int sensorValue = analogRead(_sensor);
+    if(abs(sensorValue - _lastsensorvalue) < THERMAL_NOISE) {         // Ignore if sensor change is too small. Used to filter electrical noise
+      return;
+    }
+    int midivalue = min(1.0 * sensorValue/_max_sensor * 127, 127);    // Scale sensor reading to 0-127
+    if (_invert){
+      midivalue = 127 - midivalue;                                    // Invert value if sensor is mounted in reverse
+    }    
+    if ( (midivalue == _last_midivalue) ||                            // Skip if midi value not changed, even if sensorValue was changed
+      (DEBOUNCE == true && midivalue == _prev_midivalue)) {           // Avoids also simple bounce back of MIDI message. eg: 80 82 80, last 80 is not sent.
+      return;
+    }
+    _lastsensorvalue = sensorValue;
+    _prev_midivalue = _last_midivalue;
+    _last_midivalue = midivalue;
+    controlChange(_channel, _midi_cc, midivalue);
+    MidiUSB.flush();                                                  //send all the data!
+    _last_midi_millis = now;
     
-    //if(sensorValue-lastsensorvalue != 0){
-    if(abs(sensorValue-lastsensorvalue) >= 8){//ignore if sensor change is too small
-      int midivalue = min(1.0* sensorValue / _max_sensor * 127, 127);
-      if (_invert == 1){
-        midivalue = 127-midivalue;
-      }
-      if (midivalue != last_midivalue && (NO_DEBOUNCE || midivalue != prev_midivalue) ) { //smooth midi + avoid simple bounce
-        unsigned long now = millis();
-        if (now - last_midi_millis <= _min_idle) {
-          //Serial.println("skip");  
-          return;
-        }
-        lastsensorvalue=sensorValue;
-        prev_midivalue = last_midivalue;
-        last_midivalue = midivalue;
-        controlChange(_channel, _midi_cc, midivalue);
-        if (_midi_cc2 != -1) {
-          controlChange(_channel, _midi_cc2, midivalue); 
-        }
-        //Serial.println(sensorValue);
-        //Serial.println(midivalue);
-        MidiUSB.flush(); //send all the data!
-        last_midi_millis = now;
-      }
-    }  
-  };
+    if (debug) {
+      Serial.println(sensorValue);
+      //Serial.println(midivalue);
+    }
+  }
 };
 
-static int MAX_A=910; //928
-static int CHANNEL=2; // Typically reported to the user as 1-16. In reality will be sent 0-15. 
-Sensor sensor_a3(A3, MAX_A, CHANNEL, 64); //sustain pedal:64
-Sensor sensor_a2(A2, MAX_A, CHANNEL, 22, true, 27); //volume:7
-Sensor sensor_a1(A1, MAX_A, CHANNEL, 23, true, 28); //output:8, ambient volume 17
-Sensor sensor_a0(A0, MAX_A, CHANNEL, 24, true, 29); //key release noise:9, close volume 16
 
-void setup()
-{
+// -----------------------------------------------------------------------------
+// Button
+// -----------------------------------------------------------------------------
+class Button {
+  int _pin;
+  int _midi_cc;
+  int _channel;
+  int _read_pressed = HIGH;         // LOW for internal buttons
+  bool _last_button_state = false;  // true = pressed
+  unsigned long _last_midi_millis = 0;
+  
+  public:
+  Button(int inputPin, int channel, int midi_cc) {
+    _pin = inputPin;
+    _channel = channel;
+    _midi_cc = midi_cc;
+    pinMode(_pin, INPUT_PULLUP);    // INPUT or INPUT_PULLUP (without pullup resistor)
+    if (_pin == 0) { 
+      _read_pressed = LOW;          // internal button pressed for ESP8266 is LOW
+    }
+  }
+
+  void manage_button(bool debug) {
+    unsigned long now = millis();
+    if (now - _last_midi_millis <= MIN_IDLE_MS) {  // At least _min_idle ms before sending next Midi message
+      return;
+    }
+    bool current_button_state = false;
+    int current_read = digitalRead(_pin);
+    if (current_read == _read_pressed) {
+      current_button_state = true;
+    }
+    if (current_button_state == _last_button_state){
+      return;
+    }
+    _last_button_state = current_button_state;
+    if (current_button_state) {
+      controlChange(_channel, _midi_cc, 127); 
+    } else {
+      controlChange(_channel, _midi_cc, 0); 
+    }
+    MidiUSB.flush();                             //send all the data!
+    _last_midi_millis = now;
+
+    if (debug) {
+      Serial.println(current_button_state);
+    }
+  }
+};
+
+
+
+// -----------------------------------------------------------------------------
+// Setup
+// -----------------------------------------------------------------------------
+Sensor s_a3(A3, MAX_A, CHANNEL, PED_CC);
+Sensor s_a2(A2, MAX_A, CHANNEL, RIGHT_CC, true); 
+Sensor s_a1(A1, MAX_A, CHANNEL, MID_CC, true);
+Sensor s_a0(A0, MAX_A, CHANNEL, LEFT_CC, true);
+
+Button b_10(10, CHANNEL, DIGI_CC);
+
+void setup() {            //needed to call methods once
   Serial.begin(115200);
 }
 
+// -----------------------------------------------------------------------------
+// Loop
+// -----------------------------------------------------------------------------
 void loop() {
-   sensor_a0.manage_sensor();
-   sensor_a1.manage_sensor();
-   sensor_a2.manage_sensor();
-   sensor_a3.manage_sensor();
+  s_a0.manage_sensor(false);
+  s_a1.manage_sensor(false);
+  s_a2.manage_sensor(false);
+  s_a3.manage_sensor(false);    //sustain
+  
+  b_10.manage_button(false);
 }
