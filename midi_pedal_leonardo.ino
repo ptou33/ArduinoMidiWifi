@@ -1,17 +1,19 @@
 /*
- * Sustain analog pedal, 3 CC, Damper switch pedal
+ * 4 Analog Sensors: Sustain pedal (analog) + 3 Controls (potentiometers)
+ * 1 Digital switch: Damper pedal (switch)
+ *
  * Pietro Tou
  * 2022_10_23
  * 
- * This project uses a Leonardo Arduino, because it has USB MIDI programmability
+ * This project uses a Leonardo Micro, because it has USB MIDI USB programmability
  */ 
 
 #include "MIDIUSB.h"
 
 //SENSOR CONFIG
-const bool DEBOUNCE = true;        // used to debounce of midi message (eg: 80 82 80 last 80 is not sent)
-const unsigned long MIN_IDLE_MS = 10;     // at least 10 ms before sending next Midi message, too many are not useful
-const int MAX_A = 910;             // analog (A0-A3) sensor range in Leonardo should give maximum value 1000, but it does not reach 928 or less
+const bool DEBOUNCE = true;            // used to debounce of midi message (eg: 80 82 80 last 80 is not sent)
+const unsigned long MIN_IDLE_MS = 10;  // at least 10 ms before sending next Midi message, too many are not useful
+const int MAX_A = 910;                 // analog (A0-A3) sensor range in Leonardo should give maximum value 1000, but it does not reach 928 or less
 
 //MIDI CC VALUES
 #define SUSTAIN_CC      64;
